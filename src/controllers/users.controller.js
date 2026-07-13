@@ -5,6 +5,7 @@ import {uploadOnCloudinary} from "../utils/cloudinary.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
+import {Video} from "../models/video.model.js"
 import { pipeline } from "stream";
 
 const generateAccessAndRefreshTokens = async(userId) => {
@@ -350,6 +351,45 @@ const getUserChannelProfile = asyncHandler(async(req, res) =>{
     return res.status(200).json( new ApiResponse(200, channel[0], "User channel fetched successfully"))
 })
 
+const addToWatchHistory = asyncHandler(async (req, res) => {
+  const { videoId } = req.params || {};
+
+  if (!mongoose.isValidObjectId(videoId)) {
+    throw new ApiError(400, "Invalid Video Id Format ");
+  }
+
+  const video = await Video.findById(videoId);
+
+  if (!video) {
+    throw new ApiError(404, "Video Does Not Exists In Our Database");
+  }
+
+  const updatedUser = await User.findByIdAndUpdate(
+    req.user._id,
+    {
+      $addToSet: {
+        watchHistory: videoId,
+      },
+    },
+    {
+      new: true,
+    }
+  ).select("-password -refreshToken");
+
+  video.views += 1;
+  await video.save({ validateBeforeSave: false });
+
+  return res
+    .status(200)
+    .json(
+      new ApiResponse(
+        200,
+        updatedUser,
+        "Video added to watchHistory Succesfully"
+      )
+    );
+});
+
 const getWatchHistory = asyncHandler(async(req,res) => {
     const user = await User.aggregate([
         {
@@ -401,4 +441,4 @@ const getWatchHistory = asyncHandler(async(req,res) => {
 
 export { registerUser, loginUser, logoutUser, refreshAccessToken, changeCurrentPassword, 
     getCurrentUser, updateAccountDetails, updateUserAvatar,
-     updateUserCoverImage, getUserChannelProfile, getWatchHistory }
+     updateUserCoverImage, getUserChannelProfile, addToWatchHistory, getWatchHistory }
