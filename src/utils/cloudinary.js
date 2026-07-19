@@ -8,7 +8,7 @@ import fs from "fs";
         api_secret: process.env.CLOUDINARY_API_SECRET// Click 'View API Keys' above to copy your API secret
     });
     
-    const uploadOnCloudinary = async (localFilePath) => {
+const uploadOnCloudinary = async (localFilePath) => {
     try {
         if (!localFilePath) return null
         //upload the file on cloudinary
@@ -31,6 +31,38 @@ import fs from "fs";
     }
 }
 
+const deleteFromCloudinary = async (publicId, resourceType = "image") => {
+    try {
+        if (!publicId) return null;
+        const result = await cloudinary.uploader.destroy(publicId, {
+        resource_type: resourceType,
+        });
+        return result;
+        } catch (error) {
+         console.error("Cloudinary file deletion failed:", error);
+        return null;
+    }
+};
+
+const extractPublicId = (url) => {
+  if (!url) return null;
+  
+  try {
+    const publicId = url
+      .split("/upload/")[1]       // Get everything after '/upload/'
+      .split("/")                 // Split into array
+      .slice(1)                   // Drop the version string (e.g., 'v12345')
+      .join("/")                  // Join back the remaining path
+      .split(".")[0];             // Strip file extension (.jpg/.png)
+      
+    return publicId;
+  } catch (error) {
+    console.error("Failed to extract Cloudinary public ID:", error);
+    return null;
+  }
+};
 
 
-export {uploadOnCloudinary};
+
+
+export {uploadOnCloudinary, deleteFromCloudinary, extractPublicId };

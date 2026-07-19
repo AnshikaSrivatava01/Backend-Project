@@ -1,12 +1,14 @@
 import {asyncHandler} from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { User } from "../models/user.model.js";
-import {uploadOnCloudinary} from "../utils/cloudinary.js";
+import {uploadOnCloudinary,  deleteFromCloudinary,
+  extractPublicId} from "../utils/cloudinary.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import {Video} from "../models/video.model.js"
 import { pipeline } from "stream";
+import {cacheManager} from "../redis/cache.utils.js"
 
 const generateAccessAndRefreshTokens = async(userId) => {
     try {
@@ -124,7 +126,7 @@ const loginUser = asyncHandler( async (req, res) => {
 const logoutUser = asyncHandler(async(req, res) => {
      console.log("Logout controller called");
        await User.findByIdAndUpdate(req.user._id,{
-            $unset: {refreshToken: 1}
+            $set: {refreshToken: ""}
         },
         {new: true}
         )
@@ -132,6 +134,9 @@ const logoutUser = asyncHandler(async(req, res) => {
           httpOnly: true,
           secure: true
         }
+
+        const cacheKey = `user:profile:${req.user?.username?.toLowerCase()}`;
+            cacheManager.delete(cacheKey);
 
         return res.status(200)
         .clearCookie("accessToken")
@@ -204,6 +209,9 @@ const changeCurrentPassword = asyncHandler(async(req, res) => {
     user.password = newPassword
     await user.save({validateBeforeSave: false})
 
+    const cacheKey = `user:profile:${req.user?.username?.toLowerCase()}`;
+  cacheManager.delete(cacheKey);
+
     return res.status(200).
     json(new ApiResponse(200, {}, "Password changed succesfully"))
 })
@@ -239,20 +247,36 @@ const updateUserAvatar = asyncHandler(async(req, res) => {
         throw new ApiError(400, "Avatar file is missing")
     }
 
-    const avatar = await uploadOnCloudinary(avatarLocalPath)
+    const currentUser = await User.findById(req.user?._id);
+    const oldAvatarUrl = currentUser?.avatar;
 
-    if(!avatar.url) {
-        throw new ApiError(400, "Error while uploading on avatar")
+    const newAvatar = await uploadOnCloudinary(avatarLocalPath);
+    if (!newAvatar.url) {
+        throw new ApiError(400, "Error While Uploading New Avatar");
     }
 
     const user = await User.findByIdAndUpdate(
-        req.user?._id, 
+        req.user?._id,
         {
-            $set:{
-                avatar: avatar.url
-            }
-        }, {new: true})
-        .select("-password")
+        $set: { avatar: newAvatar.url },
+        },
+        { new: true }
+    ).select("-password -refreshToken");
+
+    if (oldAvatarUrl) {
+        const oldPublicId = extractPublicId(oldAvatarUrl);
+        if (oldPublicId) {
+        deleteFromCloudinary(oldPublicId).catch((err) =>
+            console.error(
+            `Background asset deletion failed for publicId [${oldPublicId}]:`,
+            err
+            )
+        );
+        }
+    }
+
+    const cacheKey = `user:profile:${req.user?.username?.toLowerCase()}`;
+    cacheManager.delete(cacheKey);
 
     return res.status(200).json(new ApiResponse(200, user, "Avatar updated successfully"))
 })
@@ -264,14 +288,37 @@ const updateUserCoverImage = asyncHandler(async(req, res) => {
         throw new ApiError(400, "Cover Image file is missing")
     }
 
-    const coverImage = await uploadOnCloudinary(coverImageLocalPath)
+     const currentUser = await User.findById(req.user?._id);
+    const oldCoverImageUrl = currentUser?.coverImage;
 
-    if(!coverImage.url) {
-        throw new ApiError(400, "Error while uploading on cover image ")
+    const newCoverImage = await uploadOnCloudinary(coverImageLocalPath);
+    if (!newCoverImage.url) {
+        throw new ApiError(400, "Error While Uploading Cover Image");
     }
 
-    const user = await User.findByIdAndUpdate(req.user?._id, 
-        {$set:{coverImage : coverImage.url}}, {new: true}).select("-password")
+    const user = await User.findByIdAndUpdate(
+        req.user?._id,
+        {
+        $set: { coverImage: newCoverImage.url },
+        },
+        { new: true }
+    ).select("-password -refreshToken");
+
+    const oldPublicId = extractPublicId(oldCoverImageUrl);
+    if (user?.coverImage) {
+        const oldPublicId = extractPublicId(oldCoverImageUrl);
+        if (oldPublicId) {
+        deleteFromCloudinary(oldPublicId).catch((err) =>
+            console.error(
+            `Background asset deletion failed for publicId [${oldPublicId}]:`,
+            err
+            )
+        );
+        }
+    }
+
+    const cacheKey = `user:profile:${req.user?.username?.toLowerCase()}`;
+    cacheManager.delete(cacheKey);
 
     return res.status(200).json(new ApiResponse(200, user, "Cover image updated successfully"))
 })
@@ -282,6 +329,18 @@ const getUserChannelProfile = asyncHandler(async(req, res) =>{
 
     if (!username?.trim()) {
         throw new ApiError(400, "username is missing")
+    }
+     const isOwnerRequest =
+        req.user?.username?.toLowerCase() === username?.toLowerCase();
+    const cacheKey = `user:profile:${username?.toLowerCase()}`;
+
+    if (isOwnerRequest) {
+        const cachedResult = await cacheManager.get(cacheKey);
+        if (cachedResult) {
+        console.log("⚡ [Redis Cache Hit]: Serving channel profile to the owner");
+        return res.status(cachedResult.statusCode).json(cachedResult);
+        }
+        console.log("🐢 [Redis Cache Miss]: Loading channel profile from MongoDB");
     }
  
     const channel = await User.aggregate([
@@ -347,6 +406,10 @@ const getUserChannelProfile = asyncHandler(async(req, res) =>{
     if (!channel?.length) {
        throw new ApiError(404, "Channel does not exists") 
     }
+    if (isOwnerRequest) {
+        cacheManager.set(cacheKey, channel[0], 1800); // Cached for 30 mins
+    }
+
 
     return res.status(200).json( new ApiResponse(200, channel[0], "User channel fetched successfully"))
 })
@@ -379,6 +442,8 @@ const addToWatchHistory = asyncHandler(async (req, res) => {
   video.views += 1;
   await video.save({ validateBeforeSave: false });
 
+  cacheManager.delete(`user:history:${req.user?._id}`);
+
   return res
     .status(200)
     .json(
@@ -391,6 +456,18 @@ const addToWatchHistory = asyncHandler(async (req, res) => {
 });
 
 const getWatchHistory = asyncHandler(async(req,res) => {
+     const cacheKey = `user:history:${req.user?._id}`;
+
+    const cachedResult = await cacheManager.get(cacheKey);
+    if (cachedResult) {
+        console.log("⚡ [Redis Cache Hit]: Serving watch history from memory");
+        return res.status(cachedResult.statusCode).json(cachedResult);
+    }
+
+    console.log(
+        "🐢 [Redis Cache Miss]: Fetching nested watch history from MongoDB"
+    )
+
     const user = await User.aggregate([
         {
             $match: {
@@ -434,6 +511,10 @@ const getWatchHistory = asyncHandler(async(req,res) => {
     ])
     if (!user.length) {
     throw new ApiError(404, "User not found");
+
+     if (user?.[0]?.watchHistory) {
+        cacheManager.set(cacheKey, user[0].watchHistory, 300);
+    }
 }
 
     return res.status(200).json( new ApiResponse(200, user[0].watchHistory,"Watch History Fetched"));

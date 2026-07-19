@@ -6,6 +6,7 @@ import {ApiError} from "../utils/ApiError.js"
 import {ApiResponse} from "../utils/ApiResponse.js"
 import {asyncHandler} from "../utils/asyncHandler.js"
 import { User } from "../models/user.model.js"
+import { cacheManager } from "../redis/cache.utils.js";
 
 const getChannelStats = asyncHandler(async (req, res) => {
     // TODO: Get the channel stats like total video views, total subscribers, total videos, total likes etc.
@@ -102,6 +103,15 @@ const getChannelVideos = asyncHandler(async (req, res) => {
         throw new ApiError(404, "Channel not found")
     }
 
+    const cacheKey = `dashboard:videos:${channelId}`;
+
+    const cachedResult = await cacheManager.get(cacheKey);
+    if (cachedResult) {
+        console.log("redis cache hit in get channel videos");
+        return res.status(cachedResult.statusCode).json(cachedResult);
+    }
+    console.log("redis miss in get channel videos !! moving to mongoDB");
+
     const videos = await Video.aggregate([
         {
             $match: {
@@ -142,6 +152,13 @@ const getChannelVideos = asyncHandler(async (req, res) => {
             }
         }
     ]);
+
+    cacheManager.set(cacheKey, videos, 1800);
+    if (!videos?.length) {
+        return res
+        .status(200)
+        .json(new ApiResponse(200, [], "No videos found for this channel"));
+    }
 
      return res.status(200).json(
         new ApiResponse(
